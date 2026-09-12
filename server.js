@@ -178,6 +178,13 @@ app.get('/proctoring/cheat-alerts', async (req, res) => {
     } catch (e) { res.json([]); }
 });
 
+app.delete('/proctoring/cheat-alerts/:id', async (req, res) => {
+    try {
+        await supabase.from('cheat_alerts').delete().eq('id', req.params.id);
+        res.status(204).send();
+    } catch (e) { res.status(500).send(e.message); }
+});
+
 // --- 🎥 VIDEO UPLOAD ---
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
@@ -210,6 +217,7 @@ setInterval(async () => {
 }, 24 * 60 * 60 * 1000);
 
 app.listen(PORT, '0.0.0.0', () => console.log(`Server Ready on ${PORT}`));
+
 
 
 
