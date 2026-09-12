@@ -1,4 +1,4 @@
-﻿require('dotenv').config();
+require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const bodyParser = require('body-parser');
@@ -25,38 +25,31 @@ app.get('/', (req, res) => {
     res.send('<h1>Quiz App Backend (Supabase) is Live!</h1>');
 });
 
-// --- MASTER RESET ---
-app.get('/dev/factory-reset', async (req, res) => {
-    try {
-        await supabase.from('users').delete().neq('id', '0');
-        await supabase.from('groups').delete().neq('id', '0');
-        await supabase.from('questions').delete().neq('id', '0');
-        await supabase.from('attempts').delete().neq('id', '0');
-        await supabase.from('allowed_students').delete().neq('id', '0');
-        res.json({ message: "Success: All database records have been deleted." });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
 // --- AUTH ---
 
 // Signup
 app.post('/auth/signup', async (req, res) => {
+    console.log('Signup Attempt:', req.body.email);
     try {
-        const { email, password, name, role } = req.body;
+        const { email, password, name, role, deviceId } = req.body;
         const id = uuidv4();
 
         const { data, error } = await supabase
             .from('users')
-            .insert([{ id, email, password, name, role }])
+            .insert([{ id, email, password, name, role, device_id: deviceId }])
             .select()
             .single();
 
         if (error) {
+            console.error('Supabase Signup Error:', error.message);
             if (error.code === '23505') return res.status(409).json({ message: "User exists" });
             throw error;
         }
         res.json(data);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        console.error('Signup Crash:', e.message);
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // Login
@@ -96,7 +89,6 @@ app.get('/groups', async (req, res) => {
             .select('*')
             .eq('teacher_id', req.query.teacherId);
 
-        // Map snake_case to camelCase for Android App
         const mapped = data.map(g => ({
             id: g.id,
             name: g.name,
@@ -139,15 +131,14 @@ app.delete('/groups/:id', async (req, res) => {
         await supabase.from('groups').delete().eq('id', gid);
         await supabase.from('questions').delete().eq('group_id', gid);
         await supabase.from('attempts').delete().eq('group_id', gid);
-        await supabase.from('allowed_students').delete().eq('group_id', gid);
         res.status(204).send();
     } catch (e) { res.status(500).send(e.message); }
 });
 
 app.get('/groups/search', async (req, res) => {
     try {
-        const { subjectCode, passKey, studentName } = req.query;
-        const { data: group, error } = await supabase
+        const { subjectCode, passKey } = req.query;
+        const { data: group } = await supabase
             .from('groups')
             .select('*')
             .ilike('subject_code', subjectCode.trim())
@@ -155,23 +146,6 @@ app.get('/groups/search', async (req, res) => {
             .single();
 
         if (!group) return res.status(404).json({ message: 'Invalid Code' });
-
-        // Allowed Student Check
-        const { count } = await supabase
-            .from('allowed_students')
-            .select('*', { count: 'exact', head: true })
-            .eq('group_id', group.id);
-
-        if (count > 0) {
-            const { data: isAllowed } = await supabase
-                .from('allowed_students')
-                .select('*')
-                .eq('group_id', group.id)
-                .ilike('student_name', studentName.trim())
-                .single();
-
-            if (!isAllowed) return res.status(403).json({ message: 'Not authorized' });
-        }
 
         res.json({
             id: group.id,
@@ -275,14 +249,6 @@ app.post('/attempts', async (req, res) => {
             timestamp: Date.now()
         };
         await supabase.from('attempts').insert([payload]);
-
-        // Auto-remove student from passkey list
-        if (a.studentName && a.groupId) {
-            await supabase.from('allowed_students')
-                .delete()
-                .eq('group_id', a.groupId)
-                .ilike('student_name', a.studentName.trim());
-        }
         res.json({ message: "Saved" });
     } catch (e) { res.status(500).send(e.message); }
 });
@@ -290,45 +256,6 @@ app.post('/attempts', async (req, res) => {
 app.delete('/attempts/:id', async (req, res) => {
     try {
         await supabase.from('attempts').delete().eq('id', req.params.id);
-        res.status(204).send();
-    } catch (e) { res.status(500).send(e.message); }
-});
-
-// --- ALLOWED STUDENTS ---
-
-app.get('/groups/:groupId/students', async (req, res) => {
-    try {
-        const { data } = await supabase
-            .from('allowed_students')
-            .select('*')
-            .eq('group_id', req.params.groupId);
-
-        const mapped = data.map(s => ({
-            id: s.id,
-            groupId: s.group_id,
-            teacherId: s.teacher_id,
-            studentName: s.student_name
-        }));
-        res.json(mapped);
-    } catch (e) { res.status(500).send(e.message); }
-});
-
-app.post('/groups/:groupId/students', async (req, res) => {
-    try {
-        const payload = {
-            id: uuidv4(),
-            group_id: req.params.groupId,
-            teacher_id: req.body.teacherId,
-            student_name: req.body.studentName
-        };
-        const { data } = await supabase.from('allowed_students').insert([payload]).select().single();
-        res.json(data);
-    } catch (e) { res.status(500).send(e.message); }
-});
-
-app.delete('/groups/:groupId/students/:studentId', async (req, res) => {
-    try {
-        await supabase.from('allowed_students').delete().eq('id', req.params.studentId);
         res.status(204).send();
     } catch (e) { res.status(500).send(e.message); }
 });
@@ -345,23 +272,5 @@ app.post('/proctoring/upload', upload.single('video'), (req, res) => {
     res.json({ url: `${protocol}://${host}/uploads/${req.file.filename}` });
 });
 
-// --- CLEANUP (15 Days) ---
-const cleanupOldData = async () => {
-    const fifteenDaysAgo = Date.now() - (15 * 24 * 60 * 60 * 1000);
-    try {
-        const { data } = await supabase.from('attempts').select('*').lt('timestamp', fifteenDaysAgo);
-        if (data) {
-            for (let a of data) {
-                if (a.video_path) {
-                    const fn = path.basename(a.video_path);
-                    const fp = path.join(__dirname, 'uploads', fn);
-                    if (fs.existsSync(fp)) fs.unlinkSync(fp);
-                }
-                await supabase.from('attempts').delete().eq('id', a.id);
-            }
-        }
-    } catch (err) { console.error(err); }
-};
-setInterval(cleanupOldData, 24 * 60 * 60 * 1000);
-
 app.listen(PORT, '0.0.0.0', () => console.log(`Server on ${PORT}`));
+
