@@ -28,6 +28,7 @@ app.get('/dev/factory-reset', async (req, res) => {
         await supabase.from('attempts').delete().neq('id', '0');
         await supabase.from('questions').delete().neq('id', '0');
         await supabase.from('cheat_alerts').delete().neq('id', '0');
+        await supabase.from('allowed_students').delete().neq('id', '0');
         await supabase.from('groups').delete().neq('id', '0');
         await supabase.from('users').delete().neq('id', '0');
         res.json({ message: "Database Cleaned Successfully" });
@@ -64,22 +65,56 @@ app.get('/groups', async (req, res) => {
 app.post('/groups', async (req, res) => {
     try {
         const g = req.body;
-        const payload = { id: g.id || uuidv4(), name: g.name, teacher_id: g.teacherId, subject_code: g.subjectCode, pass_key: g.passKey, time_limit: g.timeLimit };
-        const { data } = await supabase.from('groups').upsert([payload]).select().single();
+        const id = g.id && g.id.length > 5 ? g.id : uuidv4();
+        const payload = { id, name: g.name, teacher_id: g.teacherId, subject_code: g.subjectCode, pass_key: g.passKey, time_limit: g.timeLimit };
+        const { data, error } = await supabase.from('groups').upsert([payload]).select().single();
+        if (error) throw error;
         res.json({ ...data, teacherId: data.teacher_id, subjectCode: data.subject_code, passKey: data.pass_key, timeLimit: data.time_limit });
     } catch (e) { res.status(500).send(e.message); }
 });
 
 app.get('/groups/search', async (req, res) => {
     try {
-        const { subjectCode, passKey } = req.query;
+        const { subjectCode, passKey, studentName } = req.query;
         const { data: group } = await supabase.from('groups').select('*').ilike('subject_code', subjectCode.trim()).ilike('pass_key', passKey.trim()).single();
         if (!group) return res.status(404).json({ message: 'Invalid Code' });
+
+        // Security check for allowed student
+        const { count } = await supabase.from('allowed_students').select('*', { count: 'exact', head: true }).eq('group_id', group.id);
+        if (count > 0) {
+            const { data: isAllowed } = await supabase.from('allowed_students').select('*').eq('group_id', group.id).ilike('student_name', studentName.trim()).single();
+            if (!isAllowed) return res.status(403).json({ message: 'Not authorized by teacher' });
+        }
+
         res.json({ id: group.id, name: group.name, teacherId: group.teacher_id, subjectCode: group.subject_code, passKey: group.pass_key, timeLimit: group.time_limit });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- ❓ QUESTIONS (Fixed Missing Route) ---
+// --- 📋 ALLOWED STUDENTS (Teacher Management) ---
+app.get('/groups/:groupId/students', async (req, res) => {
+    try {
+        const { data } = await supabase.from('allowed_students').select('*').eq('group_id', req.params.groupId);
+        res.json((data || []).map(s => ({ id: s.id, groupId: s.group_id, teacherId: s.teacher_id, studentName: s.student_name })));
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+app.post('/groups/:groupId/students', async (req, res) => {
+    try {
+        const payload = { id: uuidv4(), group_id: req.params.groupId, teacher_id: req.body.teacherId, student_name: req.body.studentName };
+        const { data, error } = await supabase.from('allowed_students').insert([payload]).select().single();
+        if (error) throw error;
+        res.json({ id: data.id, groupId: data.group_id, teacherId: data.teacher_id, studentName: data.student_name });
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+app.delete('/groups/:groupId/students/:studentId', async (req, res) => {
+    try {
+        await supabase.from('allowed_students').delete().eq('id', req.params.studentId);
+        res.status(204).send();
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+// --- ❓ QUESTIONS ---
 app.get('/questions', async (req, res) => {
     try {
         const { data } = await supabase.from('questions').select('*').eq('group_id', req.query.groupId);
@@ -120,6 +155,8 @@ app.post('/attempts', async (req, res) => {
     try {
         const a = req.body;
         await supabase.from('attempts').insert([{ id: uuidv4(), student_id: a.studentId, student_name: a.studentName, teacher_id: a.teacherId, group_id: a.groupId, subject_name: a.subjectName, score: a.score, total_questions: a.totalQuestions, video_path: a.videoPath, timestamp: Date.now() }]);
+        // Auto-remove student from passkey list after submission
+        await supabase.from('allowed_students').delete().eq('group_id', a.groupId).ilike('student_name', a.studentName.trim());
         res.json({ message: "Saved" });
     } catch (e) { res.status(500).send(e.message); }
 });
@@ -173,6 +210,7 @@ setInterval(async () => {
 }, 24 * 60 * 60 * 1000);
 
 app.listen(PORT, '0.0.0.0', () => console.log(`Server Ready on ${PORT}`));
+
 
 
 
