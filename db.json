@@ -1,0 +1,41 @@
+{
+  "users": [
+    {
+      "email": "jatav@gmail.com",
+      "id": "60fb33da-9cc0-4daa-84aa-f936d5da5d17",
+      "name": "Priyanshu Singh",
+      "password": "jatav123",
+      "role": "TEACHER"
+    },
+    {
+      "email": "or123@gmail.com",
+      "id": "87d55c5a-4948-4d73-b519-49b421b63ee1",
+      "name": "Priyanshu Singh",
+      "password": "priyanshu",
+      "role": "TEACHER"
+    }
+  ],
+  "groups": [
+    {
+      "id": "dummy-group-id",
+      "name": "Test Class",
+      "teacherId": "60fb33da-9cc0-4daa-84aa-f936d5da5d17",
+      "subjectCode": "TEST1",
+      "passKey": "123456",
+      "timeLimit": 10
+    }
+  ],
+  "questions": [
+    {
+      "id": "dummy-q-id",
+      "text": "What is 2 + 2?",
+      "optionA": "3",
+      "optionB": "4",
+      "optionC": "5",
+      "optionD": "6",
+      "correctOption": "B",
+      "groupId": "dummy-group-id"
+    }
+  ],
+  "attempts": []
+}

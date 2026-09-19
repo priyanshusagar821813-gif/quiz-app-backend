@@ -1,0 +1,261 @@
+﻿require('dotenv').config();
+const express = require('express');
+const mongoose = require('mongoose');
+const bodyParser = require('body-parser');
+const cors = require('cors');
+const multer = require('multer');
+const { v4: uuidv4 } = require('uuid');
+const path = require('path');
+const fs = require('fs');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(cors());
+app.use(bodyParser.json());
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+mongoose.connect(process.env.MONGODB_URI)
+    .then(() => console.log('Database Connected and Ready'))
+    .catch(err => console.error('DB Error:', err));
+
+// Models
+const User = mongoose.model('User', new mongoose.Schema({ id: String, email: { type: String, unique: true }, password: { type: String, required: true }, name: String, role: String }));
+const Group = mongoose.model('Group', new mongoose.Schema({ id: String, name: String, teacherId: String, subjectCode: String, passKey: String, timeLimit: Number }));
+const Question = mongoose.model('Question', new mongoose.Schema({ id: String, text: String, optionA: String, optionB: String, optionC: String, optionD: String, correctOption: String, groupId: String }));
+const Attempt = mongoose.model('Attempt', new mongoose.Schema({ id: String, studentId: String, studentName: String, teacherId: String, groupId: String, subjectName: String, score: Number, totalQuestions: Number, videoPath: String, timestamp: { type: Number, default: Date.now } }));
+const AllowedStudent = mongoose.model('AllowedStudent', new mongoose.Schema({ id: String, groupId: String, teacherId: String, studentName: String }));
+
+// --- MASTER RESET ---
+app.get('/dev/factory-reset', async (req, res) => {
+    try {
+        await User.deleteMany({});
+        await Group.deleteMany({});
+        await Question.deleteMany({});
+        await Attempt.deleteMany({});
+        await AllowedStudent.deleteMany({});
+        res.json({ message: "Success: All database records have been deleted." });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- SMART DELETE SYSTEM ---
+
+// Delete Account (Teacher/Student)
+app.delete('/auth/account', async (req, res) => {
+    try {
+        const uid = req.query.uid;
+        if (!uid) return res.status(400).send("User ID is missing");
+
+        await User.findOneAndDelete({ id: uid });
+        await Group.deleteMany({ teacherId: uid });
+        await Attempt.deleteMany({ $or: [{ teacherId: uid }, { studentId: uid }] });
+        await AllowedStudent.deleteMany({ teacherId: uid });
+
+        console.log(`Deleted user: ${uid}`);
+        res.status(204).send();
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+// Delete Group (Teacher Only)
+app.delete('/groups/:id', async (req, res) => {
+    try {
+        const gid = req.params.id;
+        await Group.findOneAndDelete({ id: gid });
+        await Question.deleteMany({ groupId: gid });
+        await Attempt.deleteMany({ groupId: gid });
+        await AllowedStudent.deleteMany({ groupId: gid });
+        res.status(204).send();
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+// Delete Result/Attempt (Both can delete their respective view)
+app.delete('/attempts/:id', async (req, res) => {
+    try {
+        const aid = req.params.id;
+        const filter = { id: aid };
+        await Attempt.findOneAndDelete(filter);
+        res.status(204).send();
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+// --- ALLOWED STUDENTS SECURITY SYSTEM ---
+
+// Get allowed students for a group (Teacher only, strictly scoped to owning teacherId)
+app.get('/groups/:groupId/students', async (req, res) => {
+    try {
+        const { groupId } = req.params;
+        const { teacherId } = req.query;
+        if (!teacherId) return res.status(400).json({ error: "teacherId required" });
+
+        // Security check: Verify group belongs to this teacher
+        const group = await Group.findOne({ id: groupId, teacherId: teacherId });
+        if (!group) return res.status(403).json({ error: "Access Denied: Group not found or unauthorized teacher" });
+
+        const students = await AllowedStudent.find({ groupId: groupId, teacherId: teacherId });
+        res.json(students);
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+// Add allowed student to a group (Teacher only, strictly scoped)
+app.post('/groups/:groupId/students', async (req, res) => {
+    try {
+        const { groupId } = req.params;
+        const { teacherId, studentName } = req.body;
+        if (!teacherId || !studentName) return res.status(400).json({ error: "teacherId and studentName required" });
+
+        // Security check: Verify group belongs to this teacher
+        const group = await Group.findOne({ id: groupId, teacherId: teacherId });
+        if (!group) return res.status(403).json({ error: "Access Denied: Group not found or unauthorized teacher" });
+
+        const newStudent = new AllowedStudent({
+            id: uuidv4(),
+            groupId,
+            teacherId,
+            studentName: studentName.trim()
+        });
+        res.json(await newStudent.save());
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+// Delete allowed student from a group (Teacher only, strictly scoped)
+app.delete('/groups/:groupId/students/:studentId', async (req, res) => {
+    try {
+        const { studentId } = req.params;
+        const { teacherId } = req.query;
+        if (!teacherId) return res.status(400).json({ error: "teacherId required" });
+
+        // Security check: Verify student record belongs to this teacher
+        const student = await AllowedStudent.findOne({ id: studentId, teacherId: teacherId });
+        if (!student) return res.status(403).json({ error: "Access Denied: Record not found or unauthorized teacher" });
+
+        await AllowedStudent.deleteOne({ id: studentId });
+        res.status(204).send();
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+// --- PROCTORING UPLOAD FIX ---
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const dir = './uploads';
+        if (!require('fs').existsSync(dir)) require('fs').mkdirSync(dir);
+        cb(null, dir);
+    },
+    filename: (req, file, cb) => cb(null, `video_${Date.now()}.mp4`)
+});
+const upload = multer({ storage });
+
+app.post('/proctoring/upload', upload.single('video'), (req, res) => {
+    try {
+        if (!req.file) return res.status(400).send("No video file received");
+        const host = req.get('host');
+        const protocol = host.includes('onrender.com') ? 'https' : 'http';
+        const fileUrl = `${protocol}://${host}/uploads/${req.file.filename}`;
+        res.json({ url: fileUrl });
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+// --- OTHERS ---
+app.get('/', (req, res) => res.send('Quiz App Backend is Live'));
+app.post('/auth/login', async (req, res) => {
+    const { email, password } = req.body;
+    const user = await User.findOne({ email, password });
+    user ? res.json(user) : res.status(401).send();
+});
+app.post('/auth/signup', async (req, res) => {
+    const data = req.body;
+    if (!data.id) data.id = uuidv4();
+    res.json(await new User(data).save());
+});
+app.get('/groups', async (req, res) => res.json(await Group.find({ teacherId: req.query.teacherId })));
+app.post('/groups', async (req, res) => {
+    const data = req.body;
+    if (!data.id) data.id = uuidv4();
+    res.json(await Group.findOneAndUpdate({ id: data.id }, data, { upsert: true, new: true }));
+});
+app.get('/groups/search', async (req, res) => {
+    const { subjectCode, passKey, studentName } = req.query;
+    const group = await Group.findOne({ subjectCode: new RegExp(`^${subjectCode}$`, 'i'), passKey: new RegExp(`^${passKey}$`, 'i') });
+    if (!group) return res.status(404).send();
+
+    // Security check: If teacher has registered allowed student names, verify student name
+    const allowedCount = await AllowedStudent.countDocuments({ groupId: group.id });
+    if (allowedCount > 0) {
+        if (!studentName) {
+            return res.status(403).json({ message: "Student name required for authorization" });
+        }
+        const trimmedName = studentName.trim();
+        const isAllowed = await AllowedStudent.findOne({
+            groupId: group.id,
+            studentName: new RegExp(`^${trimmedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')
+        });
+        if (!isAllowed) {
+            return res.status(403).json({ message: "Access Denied: You are not authorized by the teacher to take this quiz." });
+        }
+    }
+
+    res.json(group);
+});
+app.get('/questions', async (req, res) => res.json(await Question.find({ groupId: req.query.groupId })));
+app.post('/questions', async (req, res) => {
+    const data = req.body;
+    data.id = uuidv4();
+    res.json(await new Question(data).save());
+});
+app.get('/attempts', async (req, res) => {
+    const { teacherId, studentId } = req.query;
+    let q = {};
+    if (teacherId) q.teacherId = teacherId;
+    if (studentId) q.studentId = studentId;
+    res.json(await Attempt.find(q).sort({ timestamp: -1 }));
+});
+app.post('/attempts', async (req, res) => {
+    const data = req.body;
+    data.id = uuidv4();
+    await new Attempt(data).save();
+
+    // --- AUTO-REMOVE STUDENT FROM PASSKEY LIST AFTER QUIZ SUBMISSION ---
+    // Once a student submits, their name is deleted from the AllowedStudent list.
+    // This prevents them from retaking the quiz using the same passkey & subject code.
+    // Other students also cannot join until the teacher re-adds their names.
+    if (data.studentName && data.groupId) {
+        const trimmedName = data.studentName.trim();
+        try {
+            await AllowedStudent.deleteOne({
+                groupId: data.groupId,
+                studentName: new RegExp(`^${trimmedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')
+            });
+            console.log(`Auto-removed student "${trimmedName}" from allowed list for group ${data.groupId} after quiz submission.`);
+        } catch (err) {
+            console.error(`Failed to auto-remove student "${trimmedName}" from allowed list:`, err.message);
+        }
+    }
+
+    res.json({ message: "Saved" });
+});
+
+// --- AUTOMATIC CLEANUP (Delete data older than 15 days) ---
+const cleanupOldData = async () => {
+    const fifteenDaysAgo = Date.now() - (15 * 24 * 60 * 60 * 1000);
+    try {
+        const oldAttempts = await Attempt.find({ timestamp: { $lt: fifteenDaysAgo } });
+        for (let attempt of oldAttempts) {
+            if (attempt.videoPath) {
+                const fileName = path.basename(attempt.videoPath);
+                const filePath = path.join(__dirname, 'uploads', fileName);
+                if (fs.existsSync(filePath)) {
+                    fs.unlinkSync(filePath);
+                }
+            }
+            await Attempt.deleteOne({ id: attempt.id });
+        }
+        console.log(`Auto-Cleanup: Removed ${oldAttempts.length} old records.`);
+    } catch (err) {
+        console.error("Cleanup Error:", err.message);
+    }
+};
+
+// Run cleanup every 24 hours
+setInterval(cleanupOldData, 24 * 60 * 60 * 1000);
+cleanupOldData(); // Run once on startup
+
+app.listen(PORT, '0.0.0.0', () => console.log(`Server on ${PORT}`));
