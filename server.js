@@ -1,4 +1,4 @@
-﻿require('dotenv').config();
+require('dotenv').config();
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const bodyParser = require('body-parser');
@@ -282,3 +282,4 @@ setInterval(async () => {
 }, 24 * 60 * 60 * 1000);
 
 app.listen(PORT, '0.0.0.0', () => console.log(`Server Ready on ${PORT}`));
+
