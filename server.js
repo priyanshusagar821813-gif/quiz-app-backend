@@ -155,41 +155,48 @@ app.get('/attempts', async (req, res) => {
 app.post('/attempts', async (req, res) => {
     try {
         const a = req.body;
-        console.log("Saving new attempt:", a);
+        console.log("Saving new attempt (DEBUG):", JSON.stringify(a, null, 2));
 
-        const { error: insertError } = await supabase.from('attempts').insert([{
+        // Attempting to insert with multiple possible field name variants to be safe
+        const payload = {
             id: uuidv4(),
-            student_id: a.studentId,
-            student_name: a.studentName,
-            teacher_id: a.teacherId,
-            group_id: a.groupId,
-            subject_name: a.subjectName,
-            score: a.score,
-            total_questions: a.totalQuestions,
-            video_path: a.videoPath,
+            student_id: a.studentId || a.student_id,
+            student_name: a.studentName || a.student_name,
+            teacher_id: a.teacherId || a.teacher_id,
+            group_id: a.groupId || a.group_id,
+            subject_name: a.subjectName || a.subject_name,
+            score: parseInt(a.score) || 0,
+            total_questions: parseInt(a.totalQuestions) || parseInt(a.total_questions) || 0,
+            video_path: a.videoPath || a.video_path || null,
             timestamp: Date.now()
-        }]);
+        };
+
+        const { data, error: insertError } = await supabase.from('attempts').insert([payload]).select();
 
         if (insertError) {
-            console.error("Supabase Insert Error:", insertError);
-            return res.status(500).json({ error: "Database save failed", details: insertError.message });
+            console.error("Supabase Database Error:", insertError);
+            return res.status(500).json({
+                error: "Database Insert Failed",
+                message: insertError.message,
+                details: insertError.details,
+                hint: insertError.hint
+            });
         }
 
-        // Auto-remove student from passkey list after submission (Non-blocking)
-        try {
-            if (a.groupId && a.studentName) {
-                await supabase.from('allowed_students').delete()
-                    .eq('group_id', a.groupId)
-                    .ilike('student_name', a.studentName.trim());
-            }
-        } catch (e) {
-            console.error("Auto-delete student failed:", e.message);
+        console.log("Success: Attempt saved to database");
+
+        // Auto-remove student from passkey list (Non-blocking)
+        if (payload.group_id && payload.student_name) {
+            supabase.from('allowed_students').delete()
+                .eq('group_id', payload.group_id)
+                .ilike('student_name', payload.student_name.trim())
+                .then(({error}) => { if(error) console.error("Auto-delete error:", error); });
         }
 
-        res.json({ message: "Saved" });
+        res.json({ message: "Saved Successfully", data });
     } catch (e) {
-        console.error("General Error in /attempts:", e.message);
-        res.status(500).send(e.message);
+        console.error("Critical Server Error:", e.message);
+        res.status(500).json({ error: "Server Internal Error", message: e.message });
     }
 });
 
